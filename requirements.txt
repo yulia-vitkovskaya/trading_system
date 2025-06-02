@@ -8,3 +8,5 @@ mplfinance
 scikit-learn
 pytest>=7.0
 pytest-cov
+stopit
+lxml
