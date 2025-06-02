@@ -1,233 +1,193 @@
 import streamlit as st
-import pandas as pd
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
-from datetime import datetime, timedelta
-import yfinance as yf
-import requests
-import time
+import tensorflow as tf
+import os
+import json
+from datetime import datetime
+from sklearn.preprocessing import MinMaxScaler
+from src.data_processing.loader import get_sp500_tickers, choose_random_ticker, download_stock_data
+from src.data_processing.preprocessor import DataPreprocessor
+from src.modeling.model import WildregressModel
+from src.modeling.blocks import Blocks
+from src.modeling.evolution import evolve_population
+from src.modeling.inference_utils import load_saved_model, predict_with_model, evaluate_predictions
+import warnings
+warnings.filterwarnings("ignore")
 
-st.set_page_config(page_title="NeuroTrade Analytics", layout="wide")
 
-ALPHA_VANTAGE_API = "HEFEC3RJITLG276D"
-FINNHUB_API = "cni9t2pr01qjk13q9i10cni9t2pr01qjk13q9i1g"
+def create_sequences(X, y, window):
+    X_seq, y_seq = [], []
+    for i in range(window, len(X)):
+        X_seq.append(X[i-window:i])
+        y_seq.append(y[i])
+    return np.array(X_seq), np.array(y_seq)
 
-def get_finnhub_prediction(ticker):
-    try:
-        url = f"https://finnhub.io/api/v1/stock/price-target?symbol={ticker}&token={FINNHUB_API}"
-        response = requests.get(url)
-        data = response.json()
-        
-        if 'targetHigh' in data:
-            return {
-                'targetHigh': data['targetHigh'],
-                'targetLow': data['targetLow'],
-                'targetMean': data['targetMean'],
-                'targetMedian': data['targetMedian']
-            }
-        return None
-    except Exception as e:
-        st.error(f"Finnhub API error: {str(e)}")
-        return None
 
-def get_alpha_vantage_prediction(ticker):
-    try:
-        url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker}&apikey={ALPHA_VANTAGE_API}"
-        response = requests.get(url)
-        data = response.json().get('Global Quote', {})
-        
-        if data:
-            return {
-                'price': float(data.get('05. price', 0)),
-                'change': data.get('10. change percent', '0%')
-            }
-        return None
-    except Exception as e:
-        st.error(f"Alpha Vantage API error: {str(e)}")
-        return None
+st.set_page_config(page_title="🧠 NeuroTrade Evolution", layout="wide")
+st.title("📈 NeuroTrade Analytics")
 
-def get_mock_prediction(data, days):
-    last_price = data['Close'].iloc[-1]
-    ma = data['Close'].rolling(window=30).mean().iloc[-1]
-    trend = 1 if last_price > ma else -1
-    
-    pred_dates = pd.date_range(
-        start=data.index[-1] + timedelta(days=1),
-        periods=days,
-        freq='D'
-    )
-    
-    base = last_price
-    preds = []
-    for i in range(1, days+1):
-        change = np.random.normal(0.5 * trend, 0.8)
-        preds.append(base * (1 + change/100))
-        base = preds[-1]
-    
-    return pred_dates, np.array(preds)
+tab_train, tab_infer = st.tabs(["🧬 Обучение и эволюция", "📦 Загрузка модели"])
 
-@st.cache_data(ttl=3600)
-def get_stock_data(ticker, start_date, end_date, retry=3):
-    for attempt in range(retry):
-        try:
-            data = yf.download(
-                ticker,
-                start=start_date,
-                end=end_date,
-                progress=False,
-                timeout=10
+# TAB 1: Обучение и эволюция
+with tab_train:
+    with st.expander("ℹ️ Описание параметров"):
+        st.markdown("""
+        **📌 Размер окна (`window`)**  
+        Определяет, сколько предыдущих временных шагов учитывается при прогнозе следующего значения.
+
+        **🧬 Количество поколений (`generations`)**  
+        Сколько раундов будет проведено для эволюции архитектур.
+
+        **👥 Размер популяции (`population`)**  
+        Сколько архитектур будет эволюционировать одновременно.
+
+        **📚 Эпохи (`epochs`)**  
+        Сколько раз финальная модель обучается на всех данных.
+        """)
+
+    tickers = get_sp500_tickers()
+    ticker = st.selectbox("Выберите тикер из S&P 500", ["(случайный)"] + tickers)
+    window = st.slider("Размер окна", 10, 100, 60, step=5)
+    generations = st.slider("Количество поколений", 1, 10, 2)
+    population = st.slider("Размер популяции", 2, 10, 4)
+    epochs = st.slider("Эпохи обучения финальной модели", 1, 50, 15)
+
+    save_model = st.checkbox("💾 Сохранять модель и параметры", value=True)
+    start_button = st.button("🚀 Запустить обучение")
+
+    if start_button:
+        with st.spinner("Загружаем данные..."):
+            selected_ticker = choose_random_ticker(tickers) if ticker == "(случайный)" else ticker
+            df = download_stock_data(selected_ticker, start='2018-01-01')
+            df = DataPreprocessor.clean_dataset(df)
+            df = DataPreprocessor.add_all_indicators(df, windows=[5, 10], indicators=['Close'])
+
+            features = df.drop(columns=['Close'])
+            target = df[['Close']]
+            split_index = int(len(df) * 0.8)
+            features_train, features_val = features[:split_index], features[split_index:]
+            target_train, target_val = target[:split_index], target[split_index:]
+
+            scaler_x = MinMaxScaler()
+            scaler_y = MinMaxScaler()
+            X_train_scaled = scaler_x.fit_transform(features_train)
+            X_val_scaled = scaler_x.transform(features_val)
+            y_train_scaled = scaler_y.fit_transform(target_train)
+            y_val_scaled = scaler_y.transform(target_val)
+
+            X_train, y_train = create_sequences(X_train_scaled, y_train_scaled, window)
+            X_val, y_val = create_sequences(X_val_scaled, y_val_scaled, window)
+            input_shape = X_train.shape[1:]
+
+        with st.spinner("🧬 Запускаем нейроэволюцию..."):
+            blocks = Blocks()
+            best_bot_pop, best_bot, best_setblockov = evolve_population(
+                X_train, y_train, X_val, y_val, scaler_y,
+                population_size=population,
+                generations=generations,
+                input_shape=input_shape,
+                verbose=True
             )
-            
-            if not data.empty:
-                return data
-                
-            variations = [
-                ticker,
-                f"{ticker}.NS",  # Для индийских акций
-                f"{ticker}.AX",  # Для австралийских
-                f"{ticker}.L",   # Для лондонских
-                f"{ticker}.TO"   # Для канадских
-            ]
-            
-            for variation in variations:
-                if variation == ticker:
-                    continue
-                    
-                st.warning(f"Trying {variation}...")
-                data = yf.download(
-                    variation,
-                    start=start_date,
-                    end=end_date,
-                    progress=False,
-                    timeout=10
-                )
-                
-                if not data.empty:
-                    return data
-                
-            st.warning("Falling back to Alpha Vantage...")
-            return get_alpha_vantage_data(ticker)
-            
-        except Exception as e:
-            if attempt == retry - 1:
-                st.error(f"Final attempt failed: {str(e)}")
-                return None
-            time.sleep(2)  
 
-    return None
+        with st.spinner("🧠 Финальное обучение модели..."):
+            builder = WildregressModel(input_shape=input_shape)
+            model = builder(best_bot_pop, best_bot, best_setblockov, blocks)
+            model.compile(optimizer='adam', loss='mse')
+            model.fit(X_train, y_train,
+                      validation_data=(X_val, y_val),
+                      epochs=epochs,
+                      batch_size=32,
+                      verbose=0)
 
-def get_demo_data():
-    date_rng = pd.date_range(start='2020-01-01', end=datetime.now(), freq='D')
-    return pd.DataFrame({
-        'Open': np.cumsum(np.random.randn(len(date_rng))) + 100,
-        'High': np.cumsum(np.random.randn(len(date_rng))) + 105,
-        'Low': np.cumsum(np.random.randn(len(date_rng))) + 95,
-        'Close': np.cumsum(np.random.randn(len(date_rng))) + 100,
-        'Volume': np.random.poisson(1000000, size=len(date_rng))
-    }, index=date_rng)
+        with st.spinner("📊 Генерируем прогноз..."):
+            y_pred = model.predict(X_val).reshape(-1, 1)
+            y_val = y_val.reshape(-1, 1)
+            y_pred_rescaled = scaler_y.inverse_transform(y_pred)
+            y_val_rescaled = scaler_y.inverse_transform(y_val)
 
-
-def get_alpha_vantage_data(ticker):
-    API_KEY = "HEFEC3RJITLG276D"  
-    url = f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol={ticker}&apikey={API_KEY}&outputsize=full"
-    
-    try:
-        response = requests.get(url)
-        data = response.json()
-        if "Time Series (Daily)" not in data:
-            st.error(f"Alpha Vantage error: {data.get('Note', 'Unknown error')}")
-            return None
-            
-        df = pd.DataFrame(data["Time Series (Daily)"]).T
-        df = df.rename(columns={
-            '1. open': 'Open',
-            '2. high': 'High',
-            '3. low': 'Low',
-            '4. close': 'Close',
-            '5. volume': 'Volume'
-        })
-        df = df.astype(float)
-        df.index = pd.to_datetime(df.index)
-        return df.sort_index()
-    except Exception as e:
-        st.error(f"Alpha Vantage API error: {str(e)}")
-        return None
-    
-def main():
-    st.title('📊 Аналитика прогнозирования NeuroTrade Analytics')
-    
-    with st.sidebar:
-        st.header('Настройки')
-        ticker = st.text_input('Биржевой тикер', 'AAPL').strip().upper()
-        
-        if not ticker.isalnum():
-            st.error("Тикер должен содержать только буквы и цифры")
-            st.stop()
-            
-        col1, col2 = st.columns(2)
-        with col1:
-            start_date = st.date_input('Начальная Дата', datetime.now() - timedelta(days=365))
-        with col2:
-            end_date = st.date_input('Конечная Дата', datetime.now())
-            
-        if start_date >= end_date:
-            st.error("Начальная дата должна быть раньше конечной даты")
-            st.stop()
-            
-        use_demo = st.checkbox("Использовать демо-данные", True)
-
-    with st.spinner('Загрузка данных...'):
-        data = get_stock_data(ticker, start_date, end_date)
-        
-        if data is None and use_demo:
-            st.warning("Используется демо-данные")
-            data = get_demo_data()
-        elif data is None:
-            st.error("Не получилось загрузить данные. Проверьте тикер и даты.")
-            st.stop()
-    
-
-    st.subheader('🔮 Предсказание цены')
-    days_to_predict = st.slider('Кол-во дней для предсказания', 7, 90, 30)
-    
-    if st.button('Получить предсказание', type="primary"):
-        with st.spinner('Формируем предсказание...'):
-            finnhub_pred = get_finnhub_prediction(ticker)
-            if finnhub_pred:
-                st.subheader("NeuroTrade Analyst Predictions")
-                cols = st.columns(4)
-                cols[0].metric("High Target", f"${finnhub_pred['targetHigh']:.2f}")
-                cols[1].metric("Low Target", f"${finnhub_pred['targetLow']:.2f}")
-                cols[2].metric("Mean Target", f"${finnhub_pred['targetMean']:.2f}")
-                cols[3].metric("Median Target", f"${finnhub_pred['targetMedian']:.2f}")
-            
-            av_pred = get_alpha_vantage_prediction(ticker)
-            if av_pred:
-                st.subheader("Текущие данные Alpha Vantage")
-                st.metric("Текущая цена", f"${av_pred['price']:.2f}", av_pred['change'])
-            
-            st.subheader("Предсказание NeuroTrade Analytics")
-            pred_dates, pred_prices = get_mock_prediction(data, days_to_predict)
-            
-            fig, ax = plt.subplots(figsize=(12, 6))
-            ax.plot(data.index[-60:], data['Close'].values[-60:], label='Исторические данные', color='blue')
-            ax.plot(pred_dates, pred_prices, label='Прогноз', color='red', linestyle='--')
-            ax.set_title(f'{ticker} Прогноз цены ({days_to_predict} days)')
+            st.subheader(f"📉 Истина vs Прогноз для {selected_ticker}")
+            fig, ax = plt.subplots(figsize=(12, 4))
+            ax.plot(y_val_rescaled, label='Истинные значения', linewidth=2)
+            ax.plot(y_pred_rescaled, label='Прогноз модели', linestyle='--')
+            ax.set_xlabel("Временной шаг")
+            ax.set_ylabel("Цена")
             ax.legend()
+            ax.grid(True)
             st.pyplot(fig)
-            
-            forecast_df = pd.DataFrame({
-                'Date': pred_dates,
-                'Predicted Price': pred_prices,
-                'Change %': (pred_prices/pred_prices[0]-1)*100
-            }).set_index('Date')
-            
-            st.dataframe(
-                forecast_df.style.format({
-                    'Predicted Price': '${:.2f}',
-                    'Change %': '{:.2f}%'
-                })
-            )
 
-if __name__ == '__main__':
-    main()
+        if save_model:
+            st.subheader("💾 Сохраняем модель и параметры")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            model_name = f"model_{selected_ticker}_{timestamp}"
+            save_path = f"models/{model_name}"
+            os.makedirs(save_path, exist_ok=True)
+
+            model.save(f"{save_path}/model.h5")
+            metadata = {
+                "ticker": selected_ticker,
+                "window": window,
+                "generations": generations,
+                "population": population,
+                "epochs": epochs,
+                "bot_pop": best_bot_pop,
+                "bot": best_bot,
+                "setblockov": best_setblockov
+            }
+            with open(f"{save_path}/metadata.json", "w") as f:
+                json.dump(metadata, f, indent=2)
+            st.success(f"✅ Модель сохранена в {save_path}/")
+            st.json(metadata)
+
+# TAB 2: Загрузка модели
+with tab_infer:
+    st.subheader("📦 Загрузка ранее обученной модели")
+
+    model_dirs = [f.path for f in os.scandir("models") if f.is_dir()]
+    if not model_dirs:
+        st.warning("❗ В папке models нет сохранённых моделей")
+    else:
+        selected_model_dir = st.selectbox("Выберите модель для загрузки", model_dirs)
+        load_button = st.button("📥 Загрузить модель")
+
+        if load_button:
+            with st.spinner("Загружаем модель..."):
+                model, metadata = load_saved_model(selected_model_dir)
+                st.json(metadata)
+
+                df = download_stock_data(metadata["ticker"], start='2018-01-01')
+                df = DataPreprocessor.clean_dataset(df)
+                df = DataPreprocessor.add_all_indicators(df, windows=[5, 10], indicators=['Close'])
+
+                features = df.drop(columns=['Close'])
+                target = df[['Close']]
+                split_index = int(len(df) * 0.8)
+                features_train, features_val = features[:split_index], features[split_index:]
+                target_train, target_val = target[:split_index], target[split_index:]
+
+                scaler_x = MinMaxScaler()
+                scaler_y = MinMaxScaler()
+                X_val_scaled = scaler_x.fit_transform(features_val)
+                y_val_scaled = scaler_y.fit_transform(target_val)
+
+                window = metadata["window"]
+                _, y_val = create_sequences(X_val_scaled, y_val_scaled, window)
+                X_val, _ = create_sequences(X_val_scaled, y_val_scaled, window)
+
+                y_pred_rescaled = predict_with_model(model, X_val, scaler_y)
+                y_val_rescaled = scaler_y.inverse_transform(y_val)
+
+                st.subheader("📈 Прогноз на валидационных данных")
+                fig2, ax2 = plt.subplots(figsize=(12, 4))
+                ax2.plot(y_val_rescaled, label='Истинные значения', linewidth=2)
+                ax2.plot(y_pred_rescaled, label='Прогноз', linestyle='--')
+                ax2.set_xlabel("Временной шаг")
+                ax2.set_ylabel("Цена")
+                ax2.legend()
+                ax2.grid(True)
+                st.pyplot(fig2)
+
+                st.subheader("📊 Метрики качества")
+                metrics = evaluate_predictions(y_val_rescaled, y_pred_rescaled)
+                st.json(metrics)

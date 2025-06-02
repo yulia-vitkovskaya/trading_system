@@ -1,0 +1,29 @@
+{
+  "ticker": "HUBB",
+  "window": 60,
+  "generations": 10,
+  "population": 10,
+  "epochs": 50,
+  "bot_pop": [
+    0,
+    0,
+    0,
+    1,
+    1,
+    1,
+    1,
+    0,
+    1,
+    0
+  ],
+  "bot": [
+    [
+      29
+    ]
+  ],
+  "setblockov": [
+    [
+      "Dense"
+    ]
+  ]
+}

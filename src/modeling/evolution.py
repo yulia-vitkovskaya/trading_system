@@ -1,31 +1,29 @@
-import numpy as np
 import random
 import copy
+import numpy as np
 from src.modeling.model import WildregressModel, evaluate_model
 from src.modeling.blocks import Blocks
-import tensorflow as tf
 
-def initialize_population(pop_size, gene_template):
+
+def initialize_population(size, input_shape):
     population = []
-    for _ in range(pop_size):
-        bot_pop = copy.deepcopy(gene_template['bot_pop'])
-        bot = copy.deepcopy(gene_template['bot'])
-        setblockov = copy.deepcopy(gene_template['setblockov'])
-
-        # случайные мутации
-        bot[0][0] = random.choice([16, 32, 64])
-        bot_pop[7] = random.randint(0, 3)  # выбор активации
-        population.append((bot_pop, bot, setblockov))
+    for _ in range(size):
+        bot_pop = [random.randint(0, 1) for _ in range(10)]
+        bot = [[random.randint(16, 64)]]
+        setblockov = [['Dense']]
+        individual = (bot_pop, bot, setblockov)
+        population.append(individual)
     return population
 
-def mutate(bot_pop, bot, mutation_rate=0.1):
-    new_bot_pop = copy.deepcopy(bot_pop)
-    new_bot = copy.deepcopy(bot)
-    if random.random() < mutation_rate:
-        new_bot[0][0] = random.choice([16, 32, 64, 128])
-    if random.random() < mutation_rate:
-        new_bot_pop[7] = random.randint(0, 3)
-    return new_bot_pop, new_bot
+
+def mutate(individual):
+    bot_pop, bot, setblockov = copy.deepcopy(individual)
+    index = random.randint(0, len(bot_pop) - 1)
+    bot_pop[index] = 1 - bot_pop[index]
+    if random.random() < 0.5:
+        bot[0][0] = max(8, min(128, bot[0][0] + random.randint(-8, 8)))
+    return (bot_pop, bot, setblockov)
+
 
 def crossover(parent1, parent2):
     child_bot_pop = [(a if random.random() < 0.5 else b) for a, b in zip(parent1[0], parent2[0])]
@@ -33,55 +31,54 @@ def crossover(parent1, parent2):
     setblockov = copy.deepcopy(parent1[2])
     return (child_bot_pop, child_bot, setblockov)
 
+
 def evolve_population(X_train, y_train, X_val, y_val, scaler_y,
-                      population_size=6, generations=3, input_shape=None, verbose=True):
-
+                      population_size, generations, input_shape, verbose=False):
+    population = initialize_population(population_size, input_shape)
     blocks = Blocks()
-    gene_template = {
-        'bot_pop': [0]*10,
-        'bot': [[32]],
-        'setblockov': [['Dense']]
-    }
 
-    population = initialize_population(population_size, gene_template)
-
-    for gen in range(generations):
+    for generation in range(generations):
         results = []
-        if verbose:
-            print(f"🔁 Поколение {gen+1}/{generations}")
-
-        for idx, (bot_pop, bot, setblockov) in enumerate(population):
+        for individual in population:
             try:
-                model_builder = WildregressModel(input_shape=input_shape)
-                model = model_builder(bot_pop, bot, setblockov, blocks)
-                val, train_time = evaluate_model(
-                    model, scaler_y,
-                    X_train, (X_val, y_val),
-                    ep=10, verb=0,
-                    optimizer=tf.keras.optimizers.Adam(),
-                    loss='mse',
-                    channels=[0], predict_lag=1,
-                    XVAL=X_val, YVAL=y_val
-                )
-                results.append((val, (bot_pop, bot, setblockov)))
-                if verbose:
-                    print(f"  [{idx+1}] → val={val:.4f}, time={train_time:.2f}s")
-            except Exception as e:
-                print(f"  [{idx+1}] ❌ Ошибка: {e}")
-                continue
+                model = WildregressModel(input_shape=input_shape)(*individual, blocks)
+                model.compile(optimizer='adam', loss='mse')
+                val_loss, _ = evaluate_model(model, scaler_y,
+                                             train_gen=(X_train, y_train),
+                                             val_gen=(X_val, y_val),
+                                             ep=3,
+                                             verb=0,
+                                             optimizer=tf.keras.optimizers.Adam(),
+                                             loss='mse',
+                                             channels=[0],
+                                             predict_lag=1,
+                                             XVAL=X_val,
+                                             YVAL=y_val)
+            except Exception:
+                val_loss = np.inf
+            results.append((val_loss, individual))
 
-        results.sort(key=lambda x: x[0])  # сортировка по val
-        top = results[:2]  # отбор лучших
+        top = sorted(results, key=lambda x: x[0])[:2]
 
-        # создаём новое поколение
+        # fallback: если меньше двух
+        while len(top) < 2:
+            bot_pop = [random.randint(0, 1) for _ in range(10)]
+            bot = [[random.randint(16, 64)]]
+            setblockov = [['Dense']]
+            top.append((np.inf, (bot_pop, bot, setblockov)))
+
         new_population = [top[0][1], top[1][1]]
+
+        # Оставшиеся особи — мутации и кроссоверы
         while len(new_population) < population_size:
-            parent1 = random.choice(top)[1]
-            parent2 = random.choice(top)[1]
-            child = crossover(parent1, parent2)
-            mutated_child = mutate(*child)
-            new_population.append((*mutated_child, child[2]))  # добавляем setblockov
+            if random.random() < 0.5:
+                new_population.append(mutate(random.choice(top)[1]))
+            else:
+                new_population.append(crossover(*random.sample([t[1] for t in top], 2)))
+
         population = new_population
 
-    best_val, best_genome = results[0]
-    return best_genome
+        if verbose:
+            print(f"✅ Generation {generation + 1} best loss: {top[0][0]:.4f}")
+
+    return top[0][1]  # (bot_pop, bot, setblockov)

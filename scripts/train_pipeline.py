@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import tensorflow as tf
+import argparse
 from sklearn.preprocessing import MinMaxScaler
 from src.data_processing.loader import get_sp500_tickers, choose_random_ticker, download_stock_data
 from src.data_processing.preprocessor import DataPreprocessor
@@ -20,10 +21,22 @@ def create_sequences(X, y, window):
     return np.array(X_seq), np.array(y_seq)
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="📈 Обучение модели с нейроэволюцией")
+    parser.add_argument('--ticker', type=str, default=None, help='Тикер из S&P 500 (например, AAPL). Если не задан, выбирается случайно.')
+    parser.add_argument('--window', type=int, default=60, help='Размер окна для обучения модели')
+    parser.add_argument('--generations', type=int, default=2, help='Количество поколений для эволюции')
+    parser.add_argument('--population', type=int, default=4, help='Размер популяции в каждом поколении')
+    parser.add_argument('--epochs', type=int, default=15, help='Эпохи обучения финальной модели')
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+
     # Загрузка данных
     tickers = get_sp500_tickers()
-    ticker = choose_random_ticker(tickers)
+    ticker = args.ticker if args.ticker in tickers else choose_random_ticker(tickers)
     df = download_stock_data(ticker, start='2018-01-01')
 
     # Предобработка
@@ -47,9 +60,8 @@ def main():
     y_val_scaled = scaler_y.transform(target_val)
 
     # Создание окон
-    window = 60
-    X_train, y_train = create_sequences(X_train_scaled, y_train_scaled, window)
-    X_val, y_val = create_sequences(X_val_scaled, y_val_scaled, window)
+    X_train, y_train = create_sequences(X_train_scaled, y_train_scaled, args.window)
+    X_val, y_val = create_sequences(X_val_scaled, y_val_scaled, args.window)
 
     # Нейроэволюция для поиска архитектуры
     blocks = Blocks()
@@ -59,8 +71,8 @@ def main():
         X_train, y_train,
         X_val, y_val,
         scaler_y,
-        population_size=4,
-        generations=2,
+        population_size=args.population,
+        generations=args.generations,
         input_shape=input_shape,
         verbose=True
     )
@@ -71,7 +83,7 @@ def main():
     model.compile(optimizer='adam', loss='mse')
     model.fit(X_train, y_train,
               validation_data=(X_val, y_val),
-              epochs=15,
+              epochs=args.epochs,
               batch_size=32,
               verbose=1)
 
