@@ -9,5 +9,7 @@
 
 ## 🛠 Установка
 git clone https://github.com/ваш-username/NeuroTradeAnalytics.git
+
 cd NeuroTradeAnalytics
+
 pip install -r requirements.txt
