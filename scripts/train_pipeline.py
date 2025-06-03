@@ -1,110 +1,75 @@
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import tensorflow as tf
+import os
+import json
+import joblib
 import argparse
+import numpy as np
+from datetime import datetime
 from sklearn.preprocessing import MinMaxScaler
 from src.data_processing.loader import get_sp500_tickers, choose_random_ticker, download_stock_data
-from src.data_processing.preprocessor import DataPreprocessor
+from src.data_processing.processor import create_features_targets, create_sequences
 from src.modeling.model import WildregressModel
 from src.modeling.blocks import Blocks
 from src.modeling.evolution import evolve_population
-import warnings
-warnings.filterwarnings("ignore")
-
-
-def create_sequences(X, y, window):
-    X_seq, y_seq = [], []
-    for i in range(window, len(X)):
-        X_seq.append(X[i-window:i])
-        y_seq.append(y[i])
-    return np.array(X_seq), np.array(y_seq)
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="📈 Обучение модели с нейроэволюцией")
-    parser.add_argument('--ticker', type=str, default=None, help='Тикер из S&P 500 (например, AAPL). Если не задан, выбирается случайно.')
-    parser.add_argument('--window', type=int, default=60, help='Размер окна для обучения модели')
-    parser.add_argument('--generations', type=int, default=2, help='Количество поколений для эволюции')
-    parser.add_argument('--population', type=int, default=4, help='Размер популяции в каждом поколении')
-    parser.add_argument('--epochs', type=int, default=15, help='Эпохи обучения финальной модели')
-    return parser.parse_args()
 
 
 def main():
-    args = parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--window", type=int, default=60)
+    parser.add_argument("--ticker", type=str, default=None)
+    parser.add_argument("--generations", type=int, default=2)
+    parser.add_argument("--population", type=int, default=4)
+    parser.add_argument("--epochs", type=int, default=15)
+    args = parser.parse_args()
 
-    # Загрузка данных
-    tickers = get_sp500_tickers()
-    ticker = args.ticker if args.ticker in tickers else choose_random_ticker(tickers)
-    df = download_stock_data(ticker, start='2018-01-01')
+    ticker = args.ticker or choose_random_ticker(get_sp500_tickers())
+    df = download_stock_data(ticker, start="2018-01-01")
 
-    # Предобработка
-    df = DataPreprocessor.clean_dataset(df)
-    df = DataPreprocessor.add_all_indicators(df, windows=[5, 10], indicators=['Close'])
-
-    features = df.drop(columns=['Close'])
-    target = df[['Close']]
-
-    # Деление по времени
-    split_index = int(len(df) * 0.8)
-    features_train, features_val = features[:split_index], features[split_index:]
-    target_train, target_val = target[:split_index], target[split_index:]
-
-    # Масштабирование
+    features, target = create_features_targets(df)
     scaler_x = MinMaxScaler()
     scaler_y = MinMaxScaler()
-    X_train_scaled = scaler_x.fit_transform(features_train)
-    X_val_scaled = scaler_x.transform(features_val)
-    y_train_scaled = scaler_y.fit_transform(target_train)
-    y_val_scaled = scaler_y.transform(target_val)
 
-    # Создание окон
-    X_train, y_train = create_sequences(X_train_scaled, y_train_scaled, args.window)
-    X_val, y_val = create_sequences(X_val_scaled, y_val_scaled, args.window)
+    features_scaled = scaler_x.fit_transform(features)
+    target_scaled = scaler_y.fit_transform(target)
 
-    # Нейроэволюция для поиска архитектуры
-    blocks = Blocks()
-    input_shape = X_train.shape[1:]
+    X, y = create_sequences(features_scaled, target_scaled, args.window)
 
+    # Эволюция
     best_bot_pop, best_bot, best_setblockov = evolve_population(
-        X_train, y_train,
-        X_val, y_val,
-        scaler_y,
-        population_size=args.population,
+        input_shape=X.shape[1:],
+        X=X,
+        y=y,
         generations=args.generations,
-        input_shape=input_shape,
-        verbose=True
+        population_size=args.population,
+        ep=args.epochs
     )
 
-    builder = WildregressModel(input_shape=input_shape)
-    model = builder(best_bot_pop, best_bot, best_setblockov, blocks)
+    # Сборка лучшей модели
+    blocks = Blocks()
+    model = WildregressModel(input_shape=X.shape[1:])(best_bot_pop, best_bot, best_setblockov, blocks)
 
-    model.compile(optimizer='adam', loss='mse')
-    model.fit(X_train, y_train,
-              validation_data=(X_val, y_val),
-              epochs=args.epochs,
-              batch_size=32,
-              verbose=1)
+    # Сохранение модели и параметров
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    model_name = f"model_{ticker}_{timestamp}"
+    save_path = f"models/{model_name}"
+    os.makedirs(save_path, exist_ok=True)
 
-    # Прогноз
-    y_pred = model.predict(X_val).reshape(-1, 1)
-    y_val = y_val.reshape(-1, 1)
-    y_pred_rescaled = scaler_y.inverse_transform(y_pred)
-    y_val_rescaled = scaler_y.inverse_transform(y_val)
+    model.save(f"{save_path}/model.h5")
+    joblib.dump(scaler_y, f"{save_path}/scaler_y.pkl")
 
-    # Визуализация
-    plt.figure(figsize=(15, 5))
-    plt.plot(y_val_rescaled, label='Истинные значения', linewidth=2)
-    plt.plot(y_pred_rescaled, label='Прогноз модели', linestyle='--')
-    plt.title(f'📈 Прогноз vs Истина для {ticker}')
-    plt.xlabel("Временной шаг")
-    plt.ylabel("Цена")
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig("prediction_vs_actual.png")
-    print("✅ График сохранён в prediction_vs_actual.png")
+    metadata = {
+        "ticker": ticker,
+        "window": args.window,
+        "generations": args.generations,
+        "population": args.population,
+        "epochs": args.epochs,
+        "bot_pop": best_bot_pop,
+        "bot": best_bot,
+        "setblockov": best_setblockov
+    }
+    with open(f"{save_path}/metadata.json", "w") as f:
+        json.dump(metadata, f, indent=2)
+
+    print(f"✅ Модель сохранена в {save_path}/")
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ from src.modeling.blocks import Blocks
 from src.modeling.evolution import evolve_population
 from src.modeling.inference_utils import load_saved_model, predict_with_model, evaluate_predictions
 import warnings
+import joblib
 warnings.filterwarnings("ignore")
 
 
@@ -125,6 +126,7 @@ with tab_train:
             os.makedirs(save_path, exist_ok=True)
 
             model.save(f"{save_path}/model.h5")
+            joblib.dump(scaler_y, f"{save_path}/scaler_y.pkl")
             metadata = {
                 "ticker": selected_ticker,
                 "window": window,
@@ -153,7 +155,7 @@ with tab_infer:
 
         if load_button:
             with st.spinner("Загружаем модель..."):
-                model, metadata = load_saved_model(selected_model_dir)
+                model, metadata, scaler_y = load_saved_model(selected_model_dir)
                 st.json(metadata)
 
                 df = download_stock_data(metadata["ticker"], start='2018-01-01')
