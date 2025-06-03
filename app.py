@@ -172,8 +172,8 @@ with tab_infer:
                 y_val_scaled = scaler_y.fit_transform(target_val)
 
                 window = metadata["window"]
-                _, y_val = create_sequences(X_val_scaled, y_val_scaled, window)
-                X_val, _ = create_sequences(X_val_scaled, y_val_scaled, window)
+                X_val, y_val = create_sequences(X_val_scaled, y_val_scaled, window)
+
 
                 y_pred_rescaled = predict_with_model(model, X_val, scaler_y)
                 y_val_rescaled = scaler_y.inverse_transform(y_val)
